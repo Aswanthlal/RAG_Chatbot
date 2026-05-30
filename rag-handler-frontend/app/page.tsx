@@ -22,23 +22,40 @@ export default function Dashboard() {
   const [sessionId, setSessionId] = useState("session_" + crypto.randomUUID());
 
   const handleIngest = async () => {
+    if (!urls.youtube || !urls.instagram) return;
     setIsLoading(true);
+    setChat([]);
+
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/ingest', {
+      const res = await fetch('http://127.0.0.1:9000/api/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ youtube_url: urls.youtube, instagram_url: urls.instagram })
+        body: JSON.stringify({ 
+          // 🚨 Matches Python perfectly AND scrubs tracking tags!
+          youtube_url: urls.youtube.split('?')[0], 
+          instagram_url: urls.instagram.split('?')[0]
+        }),
       });
-      const resData = await res.json();
-      setMetadata({ a: resData.data.video_A, b: resData.data.video_B });
-    } catch (e) {
-      console.error("Ingestion failed", e);
+      
+      const data = await res.json();
+      console.log("BACKEND RESPONSE:", data);
+      
+      // Update state with the returned data
+      // (Adjust 'data.a' and 'data.b' if your backend uses different keys like data.metadata_a)
+      setMetadata({ 
+        a: data.video_a || data.metadata_a || data.a || null, 
+        b: data.video_b || data.metadata_b || data.b || null 
+      });
+
+    } catch (error) {
+      console.error('Ingestion failed', error);
+    } finally {
+      setIsLoading(false);
     }
-    setIsLoading(false);
   };
 
   const handleClear = async () => {
-    await fetch('http://127.0.0.1:8000/api/clear', { method: 'POST' });
+    await fetch('http://127.0.0.1:9000/api/clear', { method: 'POST' });
     setMetadata({ a: null, b: null });
     setChat([]);
     
@@ -54,7 +71,7 @@ export default function Dashboard() {
     setChat(prev => [...prev, { role: 'user', content: userMsg }, { role: 'assistant', content: '' }]);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/chat', {
+      const response = await fetch('http://127.0.0.1:9000/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -124,12 +141,11 @@ export default function Dashboard() {
   <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
     <h2 className="font-bold text-red-500 mb-2">YOUTUBE: {metadata.a.creator}</h2>
     <div className="text-xs text-zinc-400 space-y-1">
-      <p><span className="text-zinc-50">ER:</span> {metadata.a.engagement_rate}%</p>
-      <p><span className="text-zinc-50">Views:</span> {metadata.a.views.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Likes:</span> {metadata.a.likes.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Comments:</span> {metadata.a.comments.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Subscribers:</span> {metadata.a.follower_count.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Duration:</span> {formatDuration(metadata.a.duration)}</p>
+      <p><span className="text-zinc-50">ER:</span> {metadata?.a?.engagement_rate ?? 0}%</p>
+      <p><span className="text-zinc-50">Views:</span> {metadata?.a?.views?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Likes:</span> {metadata?.a?.likes?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Comments:</span> {metadata?.a?.comments?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Subscribers:</span> {metadata?.a?.follower_count?.toLocaleString() ?? 'Hidden'}</p>
     </div>
   </div>
 )}
@@ -139,13 +155,15 @@ export default function Dashboard() {
   <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
     <h2 className="font-bold text-pink-500 mb-2">INSTAGRAM: {metadata.b.creator}</h2>
     <div className="text-xs text-zinc-400 space-y-1">
-      <p><span className="text-zinc-50">ER:</span> {metadata.b.engagement_rate}%</p>
-      <p><span className="text-zinc-50">Views:</span> {metadata.b.views.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Likes:</span> {metadata.b.likes.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Comments:</span> {metadata.b.comments.toLocaleString()}</p>
-      <p><span className="text-zinc-50">Followers:</span>{' '}{metadata.b.follower_count > 0 ? metadata.b.follower_count.toLocaleString() 
-       : <span className="text-yellow-500 font-bold">Hidden by IG API</span>}</p>
-      <p><span className="text-zinc-50">Duration:</span> {formatDuration(metadata.b.duration)}</p>
+      <p><span className="text-zinc-50">ER:</span> {metadata?.b?.engagement_rate ?? 0}%</p>
+      <p><span className="text-zinc-50">Views:</span> {metadata?.b?.views?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Likes:</span> {metadata?.b?.likes?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Comments:</span> {metadata?.b?.comments?.toLocaleString() ?? 0}</p>
+      <p><span className="text-zinc-50">Followers:</span> {
+        metadata?.b?.follower_count === null 
+          ? <span className="text-yellow-500 font-bold">Hidden by IG API</span>
+          : metadata?.b?.follower_count?.toLocaleString() ?? 0
+      }</p>
     </div>
   </div>
 )}

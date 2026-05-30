@@ -19,3 +19,5 @@ langchain-google-genai
 pinecone
 
 google-generativeai
+celery 
+redis

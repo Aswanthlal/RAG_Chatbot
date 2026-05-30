@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from apify_client import ApifyClient
+from fastapi import FastAPI, BackgroundTasks
+from tasks import ingest_and_embed_video_task
 
 # Real Open-Source ML Models
 from faster_whisper import WhisperModel
@@ -33,7 +35,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 # -------------------------------------------------------------------------
 # 1. LOCAL MODELS & PERSISTENT DB
 # -------------------------------------------------------------------------
-qdrant_client = QdrantClient(path="./qdrant_storage")
+# Connect to the Dockerized Qdrant Server over the network
+qdrant_client = QdrantClient(url="http://localhost:6333")
 COLLECTION_NAME = "creator_analytics"
 
 embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
@@ -116,13 +119,14 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
             final_text = trans_data.get("text") or real_meta.get("caption", "No transcript available.")
             real_views = real_meta.get("videoViewCount") or real_meta.get("playCount") or real_meta.get("viewCount") or 1
             owner_node = real_meta.get("owner", {})
-            follower_count = (
+            # 1. Update the follower_count extraction
+            raw_followers = (
                 real_meta.get("ownerFollowersCount") or 
-                owner_node.get("followersCount") or 
-                owner_node.get("edge_followed_by", {}).get("count") or 
-                real_meta.get("user", {}).get("follower_count") or 
-                0  # Default to 0 so the UI knows it was blocked
+                real_meta.get("owner", {}).get("followersCount") or 
+                real_meta.get("user", {}).get("edge_followed_by", {}).get("count")
             )
+            # 2. Force it to None if it evaluates to 0 or False
+            follower_count = raw_followers if raw_followers else None
             
             return {
                 "video_id": video_id,
@@ -140,48 +144,63 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
                 "apify_transcript_segments": trans_data.get("segments", []), 
                 "metadata_unavailable": False
             }
+        # Find this block around line 133
         except Exception as e:
-            print(f"APIFY ERROR: {e}")
-            return {"video_id": video_id, "platform": "Instagram", "metadata_unavailable": True, "error": str(e)}
+            print(f"🚨 YOUTUBE FATAL ERROR: {str(e)}") # <--- ADD THIS LINE
+            return {"video_id": video_id, "platform": "YouTube", "metadata_unavailable": True, "error": str(e)}
     # ---------------------------------------------------------
-    # YOUTUBE: yt-dlp 
+    # YOUTUBE: Native yt-dlp + YouTubeTranscriptApi (Fast & Reliable)
     # ---------------------------------------------------------
     elif platform == "youtube":
-        output_audio_path = f"temp_{video_id}.mp3"
-        ydl_cmd = ["yt-dlp", "--skip-download", "--dump-json", "--no-warnings", url]
-        
+        print(f"🕵️‍♂️ [YT]: Extracting YouTube metadata using native libraries...")
         try:
-            process = await asyncio.create_subprocess_exec(*ydl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, _ = await process.communicate()
-            if process.returncode != 0: raise Exception("yt-dlp metadata extraction failed")
-                
-            import json
-            info = json.loads(stdout.decode())
+            import yt_dlp
+            from youtube_transcript_api import YouTubeTranscriptApi
             
-            audio_cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "-o", output_audio_path, url]
-            audio_process = await asyncio.create_subprocess_exec(*audio_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            await audio_process.communicate()
+            ydl_opts = {
+                'skip_download': True, 
+                'quiet': True, 
+                'no_warnings': True,
+                'extract_flat': False
+            }
             
+            # 1. Fetch Metadata (using a thread so it doesn't block async loop)
+            def fetch_yt_meta():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                    
+            info = await asyncio.to_thread(fetch_yt_meta)
+            
+            # 2. Fetch Transcript Instantly (No FFmpeg or MP3 downloads needed!)
+            transcript_text = ""
+            try:
+                def fetch_transcript():
+                    t_list = YouTubeTranscriptApi.get_transcript(video_id)
+                    return " ".join([t['text'] for t in t_list])
+                transcript_text = await asyncio.to_thread(fetch_transcript)
+            except Exception:
+                print(f"⚠️ [YT]: No captions found. Falling back to title/description.")
+                transcript_text = f"Title: {info.get('title', '')}. Description: {info.get('description', '')}"
+
             return {
                 "video_id": video_id,
                 "platform": "YouTube",
                 "creator": info.get("uploader", "Unknown"),
-                "follower_count": info.get("channel_follower_count", 0), # This IS the subscriber count!
+                "follower_count": info.get("channel_follower_count", 0), 
                 "views": info.get("view_count", 0) or 1,
                 "likes": info.get("like_count", 0) or 0,
                 "comments": info.get("comment_count", 0) or 0,
-                "duration": info.get("duration", 0), # NEW: Video length in seconds
-                "upload_date": info.get("upload_date", "Unknown"), # NEW: Format YYYYMMDD
-                "hashtags": info.get("tags", []), # NEW: Array of video tags
-                "audio_path": output_audio_path,
-                "apify_transcript_text": "",
+                "duration": info.get("duration", 0), 
+                "upload_date": info.get("upload_date", "Unknown"), 
+                "hashtags": info.get("tags", []), 
+                "audio_path": None, # Nullified because we skip heavy audio downloads
+                "apify_transcript_text": transcript_text, # Maps perfectly to Qdrant chunker
                 "apify_transcript_segments": [],
                 "metadata_unavailable": False
             }
         except Exception as e:
+            print(f"🚨 YOUTUBE FATAL ERROR: {str(e)}")
             return {"video_id": video_id, "platform": "YouTube", "metadata_unavailable": True, "error": str(e)}
-            
-    return {"video_id": video_id, "platform": platform, "metadata_unavailable": True, "error": "Unknown Platform"}
     
 
 def transcribe_and_embed(item: dict, label: str):
@@ -286,24 +305,24 @@ def retrieve_node(state: dict):
     video_a_id = state["video_a_id"]
     video_b_id = state["video_b_id"]
     
-    # 1. THE GUARANTEED HOOKS: Always fetch the first 15 seconds of both videos
+    # 1. THE GUARANTEED HOOKS: Always fetch the first 15 seconds
     hook_results, _ = qdrant_client.scroll(
         collection_name=COLLECTION_NAME,
         scroll_filter=models.Filter(
             must=[
                 models.FieldCondition(
                     key="start_time",
-                    range=models.Range(lte=15.0) # Anything under 15 seconds
+                    range=models.Range(lte=15.0) 
                 )
             ]
         ),
-        limit=20,
+        limit=30, # Increased from 20 to ensure we don't miss early chunks
         with_payload=True,
         with_vectors=False
     )
     
-    # Sort chronologically so the LLM reads it naturally
-    sorted_hooks = sorted(hook_results, key=lambda x: (x.payload.get('platform', ''), x.payload.get('start_time', 0)))
+    # Sort purely chronologically so the LLM reads from 0.0s upwards
+    sorted_hooks = sorted(hook_results, key=lambda x: x.payload.get('start_time', 0))
     hook_chunks = [f"[{p.payload['platform']} HOOK | {p.payload['start_time']}s - {p.payload['end_time']}s]: {p.payload['text']}" for p in sorted_hooks]
     
     # 2. SEMANTIC SEARCH: Look for specific contextual answers to the user's prompt
@@ -371,8 +390,24 @@ class ChatRequest(BaseModel):
     video_a_id: str
     video_b_id: str
 
+
+@app.get("/api/status/{task_id}")
+async def get_task_status(task_id: str):
+    # This checks the Redis queue for the Celery task status
+    from tasks import celery_app
+    task = celery_app.AsyncResult(task_id)
+    
+    if task.state == "SUCCESS":
+        # If done, fetch the final metadata from Qdrant/Database
+        # Note: You'll need to adapt this line based on how you store your metadata
+        # e.g., meta = METADATA_DATABASE.get(task.result.get("video_id"))
+        return {"status": "SUCCESS", "metadata": task.result}
+    
+    return {"status": task.state} # Returns "PENDING", "STARTED", etc.
+
 @app.post("/api/ingest")
 async def ingest_pipeline(payload: IngestRequest):
+    print(f"🚀 Starting Synchronous Ingestion...")
     yt_data, ig_data = await asyncio.gather(
         extract_metadata_and_audio(payload.youtube_url, "youtube"),
         extract_metadata_and_audio(payload.instagram_url, "instagram")
@@ -380,22 +415,24 @@ async def ingest_pipeline(payload: IngestRequest):
     
     for item, label in [(yt_data, "A"), (ig_data, "B")]:
         if not item.get("metadata_unavailable"):
-            v = item["views"]
-            item["engagement_rate"] = round(((item["likes"] + item["comments"]) / v) * 100, 2)
+            v = item.get("views", 1)
+            item["engagement_rate"] = round(((item.get("likes", 0) + item.get("comments", 0)) / v) * 100, 2)
             
         METADATA_DATABASE[item["video_id"]] = item
         
         # Offload the sync execution to a separate worker thread dynamically
-        # This keeps the main event loop entirely responsive to other network traffic!
         await asyncio.to_thread(transcribe_and_embed, item, label)
             
+    print("✅ Ingestion complete. Sending data back to UI.")
+    
+    # 🚨 FIX: Return exactly the 'a' and 'b' keys the React frontend expects!
     return {
         "status": "success",
         "video_a_id": yt_data["video_id"],
         "video_b_id": ig_data["video_id"],
-        "data": {"video_A": yt_data, "video_B": ig_data}
+        "a": yt_data,
+        "b": ig_data
     }
-
 @app.post("/api/chat")
 async def chat_interaction(req: ChatRequest):
     # Manage session history
@@ -444,9 +481,12 @@ TRANSCRIPT CONTEXT:
 {context}
 
 CRITICAL RULES:
-1. NEVER invent or hallucinate hypothetical data or transcripts. If it is not in the context, state that explicitly.
-2. AGGRESSIVELY VERIFY PREMISES: If the user states a false premise (e.g., asking why a video got more engagement when the metadata proves it actually got less), you MUST correct them immediately in your opening sentence before answering.
-3. Base all your strategic analysis strictly on the provided metadata and transcript context.
+1. NEVER invent or hallucinate hypothetical data. If it is not in the context, state that explicitly.
+2. AGGRESSIVELY VERIFY PREMISES: If the user states a false premise, you MUST correct them immediately before answering.
+3. If follower count is null, say follower count is unavailable. Never interpret null as zero.
+4. For hook comparisons: Use ONLY chunks marked HOOK. Compare Video A hook against Video B hook. Quote or summarize both. Never say a video lacks a hook if a HOOK chunk exists.
+5. For hooks: Always analyze the first 8-15 seconds specifically. Movie trailers often use dramatic visuals/audio, while short-form uses immediate humor/emotion.
+6. Be concise and data-first. Use bullet points for comparisons.
 """
 
     final_messages = [SystemMessage(content=system_prompt)] + state["messages"]
@@ -478,14 +518,6 @@ CRITICAL RULES:
             
     return StreamingResponse(generate(), media_type="text/event-stream")
 
-@app.post("/api/clear")
-async def clear_index():
-    if qdrant_client.collection_exists(COLLECTION_NAME):
-        qdrant_client.delete_collection(collection_name=COLLECTION_NAME)
-        qdrant_client.create_collection(collection_name=COLLECTION_NAME, vectors_config=VectorParams(size=384, distance=Distance.COSINE))
-    METADATA_DATABASE.clear()
-    SESSION_STORAGE.clear()
-    return {"status": "cleared"}
 
 if __name__ == "__main__":
     import uvicorn
