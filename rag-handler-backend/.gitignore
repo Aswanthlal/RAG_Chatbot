@@ -10,3 +10,10 @@ node_modules/
 
 # Secrets (CRITICAL)
 .env
+
+# Local Database
+qdrant_storage/
+
+# Temporary Audio Downloads
+temp_*.mp3
+transcript_*.txt

@@ -4,6 +4,10 @@ pydantic
 yt-dlp
 youtube-transcript-api
 python-dotenv
+faster_whisper
+fastembed
+qdrant_client
+apify-client
 
 langchain
 langchain-core
