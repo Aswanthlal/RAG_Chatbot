@@ -175,6 +175,7 @@ if __name__ == "__main__":
 
 class ChatMessage(BaseModel):
     message: str
+    history: list[dict]
     # In a full app, you'd pass a list of previous messages here for memory
 
 @app.post("/api/chat")
@@ -208,6 +209,7 @@ async def chat_with_agent(req: ChatMessage):
         streaming=True
     )
     
+    formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in req.history])
     # 5. Build the strict RAG Prompt
     system_prompt = f"""You are a highly analytical social media strategist. 
     Answer the user's question based ONLY on the provided context chunks.
@@ -215,6 +217,9 @@ async def chat_with_agent(req: ChatMessage):
     Compare the engagement rates and content hooks if asked.
     If the answer is not contained in the context, tell the user you don't have enough data.
     
+    CHAT HISTORY:
+    {formatted_history}
+
     CONTEXT:
     {context}
     """
