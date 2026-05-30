@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import subprocess
 from typing import Dict, Any, List, Literal, TypedDict
@@ -72,44 +73,76 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
     # INSTAGRAM: Apify Microservices
     # ---------------------------------------------------------
     if platform == "instagram":
-        print(f"[IG]: Fanning out to Apify Microservices (Metadata + Transcript)...")
+        print(f"🕵️‍♂️ [IG]: Fanning out to Apify Microservices (Metadata + Transcript)...")
         try:
-            meta_task = asyncio.to_thread(apify_client.actor("apify/instagram-scraper").call, run_input={"directUrls": [url]})
-            transcript_task = asyncio.to_thread(apify_client.actor("apple_yang/instagram-transcripts-scraper").call, run_input={"videoUrl": url})
+            # Task 1: Official Scraper (Fast, reliable)
+            meta_task = asyncio.to_thread(
+                apify_client.actor("apify/instagram-scraper").call, 
+                run_input={"directUrls": [url]}
+            )
             
-            meta_run, transcript_run = await asyncio.gather(meta_task, transcript_task)
+            # Task 2: Transcript Scraper (Prone to Meta blocks, adding 20s timeout)
+            transcript_task = asyncio.to_thread(
+                apify_client.actor("apple_yang/instagram-transcripts-scraper").call, 
+                run_input={"videoUrl": url},
+                timeout_secs=20
+            )
+            
+            # Run concurrently. return_exceptions=True prevents one failure from killing the other!
+            results = await asyncio.gather(meta_task, transcript_task, return_exceptions=True)
+            meta_run, transcript_run = results[0], results[1]
+            
+            # 1. Parse Metadata (Mandatory)
+            if isinstance(meta_run, Exception):
+                raise meta_run # If the main scraper fails, we must abort
             
             meta_id = getattr(meta_run, "default_dataset_id", None)
-            trans_id = getattr(transcript_run, "default_dataset_id", None)
-            
-            if not meta_id or not trans_id: raise Exception("Failed to extract dataset IDs from Apify.")
-            
             meta_items = apify_client.dataset(meta_id).list_items().items
             if not meta_items: raise Exception("Apify Metadata Scraper returned empty.")
             real_meta = meta_items[0]
             
-            trans_items = apify_client.dataset(trans_id).list_items().items
-            trans_data = trans_items[0] if trans_items else {}
-            
+            # 2. Parse Transcript (Optional / Fallback)
+            trans_data = {}
+            if not isinstance(transcript_run, Exception):
+                trans_id = getattr(transcript_run, "default_dataset_id", None)
+                if trans_id:
+                    trans_items = apify_client.dataset(trans_id).list_items().items
+                    if trans_items:
+                        trans_data = trans_items[0]
+            else:
+                print(f" [IG]: Transcript scraper timed out/blocked. Falling back to caption.")
+
+            # Calculate Fallbacks safely
+            final_text = trans_data.get("text") or real_meta.get("caption", "No transcript available.")
             real_views = real_meta.get("videoViewCount") or real_meta.get("playCount") or real_meta.get("viewCount") or 1
+            owner_node = real_meta.get("owner", {})
+            follower_count = (
+                real_meta.get("ownerFollowersCount") or 
+                owner_node.get("followersCount") or 
+                owner_node.get("edge_followed_by", {}).get("count") or 
+                real_meta.get("user", {}).get("follower_count") or 
+                0  # Default to 0 so the UI knows it was blocked
+            )
             
             return {
                 "video_id": video_id,
                 "platform": "Instagram",
                 "creator": real_meta.get("ownerUsername", trans_data.get("userName", "Unknown")),
-                "follower_count": real_meta.get("ownerFollowersCount", 0), 
+                "follower_count": follower_count,
                 "views": real_views, 
                 "likes": real_meta.get("likesCount", trans_data.get("likeCount", 0)),
                 "comments": real_meta.get("commentsCount", trans_data.get("commentCount", 0)),
+                "duration": real_meta.get("videoDuration", trans_data.get("duration", 0)),
+                "upload_date": real_meta.get("timestamp", "Unknown"), 
+                "hashtags": real_meta.get("hashtags", []), 
                 "audio_path": None, 
-                "apify_transcript_text": trans_data.get("text", ""), 
+                "apify_transcript_text": final_text, 
                 "apify_transcript_segments": trans_data.get("segments", []), 
                 "metadata_unavailable": False
             }
         except Exception as e:
-            print(f" APIFY ERROR: {e}")
+            print(f"APIFY ERROR: {e}")
             return {"video_id": video_id, "platform": "Instagram", "metadata_unavailable": True, "error": str(e)}
-
     # ---------------------------------------------------------
     # YOUTUBE: yt-dlp 
     # ---------------------------------------------------------
@@ -133,10 +166,13 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
                 "video_id": video_id,
                 "platform": "YouTube",
                 "creator": info.get("uploader", "Unknown"),
-                "follower_count": info.get("channel_follower_count", 0),
+                "follower_count": info.get("channel_follower_count", 0), # This IS the subscriber count!
                 "views": info.get("view_count", 0) or 1,
                 "likes": info.get("like_count", 0) or 0,
                 "comments": info.get("comment_count", 0) or 0,
+                "duration": info.get("duration", 0), # NEW: Video length in seconds
+                "upload_date": info.get("upload_date", "Unknown"), # NEW: Format YYYYMMDD
+                "hashtags": info.get("tags", []), # NEW: Array of video tags
                 "audio_path": output_audio_path,
                 "apify_transcript_text": "",
                 "apify_transcript_segments": [],
@@ -250,60 +286,75 @@ def retrieve_node(state: dict):
     video_a_id = state["video_a_id"]
     video_b_id = state["video_b_id"]
     
-    # Check if the user is explicitly requesting a complete transcript dump
-    is_full_transcript_request = any(keyword in query.lower() for keyword in ["entire", "full", "all the transcript", "complete transcript"])
+    # 1. THE GUARANTEED HOOKS: Always fetch the first 15 seconds of both videos
+    hook_results, _ = qdrant_client.scroll(
+        collection_name=COLLECTION_NAME,
+        scroll_filter=models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="start_time",
+                    range=models.Range(lte=15.0) # Anything under 15 seconds
+                )
+            ]
+        ),
+        limit=20,
+        with_payload=True,
+        with_vectors=False
+    )
     
-    if is_full_transcript_request:
-        print(" [Retriever]: Detected explicit full transcript request. Performing metadata scroll...")
-        
-        # Determine which video the user is targeted
-        target_label = "B" if "video b" in query.lower() or "instagram" in query.lower() else "A"
-        
-        # Scroll through Qdrant to grab ALL points matching that video label
-        scroll_results, _ = qdrant_client.scroll(
-            collection_name=COLLECTION_NAME,
-            scroll_filter=models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="video_label",
-                        match=models.MatchValue(value=target_label)
-                    )
-                ]
-            ),
-            limit=100, # Large enough to catch all segments of a typical reel/video
-            with_payload=True,
-            with_vectors=False
-        )
-        
-        # Sort sequentially by timeline sequence
-        sorted_points = sorted(scroll_results, key=lambda x: x.payload.get("start_time", 0))
-        context_chunks = [
-            f"[{p.payload['platform']} | {p.payload['start_time']}s - {p.payload['end_time']}s]: {p.payload['text']}" 
-            for p in sorted_points
-        ]
-    else:
-        # Fall back to default semantic vector search for general questions
-        query_vector = list(embedding_model.embed([query]))[0]
-        search_results = qdrant_client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_vector.tolist(),
-            limit=5
-        )
-        context_chunks = [
-            f"[{r.payload['platform']} | {r.payload['start_time']}s - {r.payload['end_time']}s]: {r.payload['text']}" 
-            for r in search_results.points
-        ]
-        
-    context_str = "\n".join(context_chunks)
+    # Sort chronologically so the LLM reads it naturally
+    sorted_hooks = sorted(hook_results, key=lambda x: (x.payload.get('platform', ''), x.payload.get('start_time', 0)))
+    hook_chunks = [f"[{p.payload['platform']} HOOK | {p.payload['start_time']}s - {p.payload['end_time']}s]: {p.payload['text']}" for p in sorted_hooks]
     
-    # Update state with the accurately retrieved context block
-    return {"context": context_str}
+    # 2. SEMANTIC SEARCH: Look for specific contextual answers to the user's prompt
+    query_vector = list(embedding_model.embed([query]))[0]
+    search_results = qdrant_client.query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_vector.tolist(),
+        limit=3 # Keep this small so we don't overflow the context window
+    )
+    semantic_chunks = [f"[{r.payload['platform']} MATCH | {r.payload['start_time']}s - {r.payload['end_time']}s]: {r.payload['text']}" for r in search_results.points]
+    
+    # Merge them into a bulletproof context block
+    context_str = "--- GUARANTEED VIDEO HOOKS (First 15s) ---\n" + "\n".join(hook_chunks) + "\n\n--- RELEVANT SEMANTIC MATCHES ---\n" + "\n".join(semantic_chunks)
+    
+    # FIX: Ensure this key matches your ChatState dictionary exactly ('context_str')
+    return {"context_str": context_str}
 
 
-# Build the Graph
+# ---------------------------------------------------------
+# THE SEMANTIC ROUTER (Gatekeeper)
+# ---------------------------------------------------------
+def route_query(state: dict) -> str:
+    query = state["messages"][-1].content.lower()
+    
+    # Fast, compute-free heuristic for conversational chat
+
+    conversational_triggers = ["hi", "hello", "hey", "thanks", "thank you", "summarize", "who are you", "ok", "got it", "awesome"]
+    
+    if any(query.startswith(trigger) or query == trigger for trigger in conversational_triggers):
+        print("🚦 [Router]: Conversational intent detected. Bypassing Vector DB...")
+        return "bypass"
+        
+    print("🚦 [Router]: Analytical intent detected. Routing to Qdrant...")
+    return "retrieve"
+
+
+# ---------------------------------------------------------
+# GRAPH COMPILATION
+# ---------------------------------------------------------
 workflow = StateGraph(ChatState)
 workflow.add_node("retrieve", retrieve_node)
-workflow.add_edge(START, "retrieve")
+
+# Use conditional entry point instead of a direct edge from START
+workflow.set_conditional_entry_point(
+    route_query,
+    {
+        "retrieve": "retrieve", # Route to Qdrant if analytical
+        "bypass": END           # Route to END if conversational (Skip retrieval)
+    }
+)
+
 workflow.add_edge("retrieve", END) # The LLM stream is handled in the route for SSE compatibility
 agent_executor = workflow.compile()
 
@@ -347,6 +398,7 @@ async def ingest_pipeline(payload: IngestRequest):
 
 @app.post("/api/chat")
 async def chat_interaction(req: ChatRequest):
+    # Manage session history
     if req.session_id not in SESSION_STORAGE:
         SESSION_STORAGE[req.session_id] = []
         
@@ -356,27 +408,46 @@ async def chat_interaction(req: ChatRequest):
 
     # Run LangGraph Retrieval
     state = agent_executor.invoke({
-        "session_id": req.session_id, "video_a_id": req.video_a_id, "video_b_id": req.video_b_id, 
-        "messages": messages, "context_str": ""
+        "session_id": req.session_id, 
+        "video_a_id": req.video_a_id, 
+        "video_b_id": req.video_b_id, 
+        "messages": messages, 
+        "context_str": ""
     })
     
+    # 🚨 FIX: Extract safe variables directly from the Request, NOT the State!
     meta_a = METADATA_DATABASE.get(req.video_a_id, {})
     meta_b = METADATA_DATABASE.get(req.video_b_id, {})
-    
-    system_prompt = f"""You are a data-driven social media engineer. 
-    Compare these videos using the retrieved transcripts and metrics.
-    
-    [METADATA STORE]
-    Video A (YT): Creator={meta_a.get('creator')}, Views={meta_a.get('views', 'N/A')}, ER={meta_a.get('engagement_rate', 'N/A')}%
-    Video B (IG): Creator={meta_b.get('creator')}, Views={meta_b.get('views', 'N/A')}, ER={meta_b.get('engagement_rate', 'N/A')}%
-    
-    [TRANSCRIPT CONTEXT]
-    {state['context_str']}
-    
-    RULES: 
-    1. Compare hooks in the first 5-10 seconds specifically.
-    2. Always cite timestamps (e.g., [YouTube | 0.0s - 4.5s]).
-    3. Be quantitative: calculate relative differences in engagement."""
+    context = state.get("context_str", "")
+
+    # ---------------------------------------------------------
+    # DYNAMIC PROMPT ROUTING
+    # ---------------------------------------------------------
+    if not context:
+        # Conversational Mode (Bypassed Qdrant)
+        system_prompt = (
+            "You are a helpful social media co-pilot. The user is greeting you or chatting. "
+            "Respond cordially, concisely, and ask how you can help them analyze their creative video data today."
+        )
+    else:
+        # Elite Analyst Mode (Data retrieved)
+        system_prompt = f"""You are an elite, highly critical social media data analyst. 
+You are comparing two videos based on their engagement metrics and transcripts.
+
+METADATA FOR VIDEO A (YouTube):
+{json.dumps(meta_a, indent=2)}
+
+METADATA FOR VIDEO B (Instagram):
+{json.dumps(meta_b, indent=2)}
+
+TRANSCRIPT CONTEXT:
+{context}
+
+CRITICAL RULES:
+1. NEVER invent or hallucinate hypothetical data or transcripts. If it is not in the context, state that explicitly.
+2. AGGRESSIVELY VERIFY PREMISES: If the user states a false premise (e.g., asking why a video got more engagement when the metadata proves it actually got less), you MUST correct them immediately in your opening sentence before answering.
+3. Base all your strategic analysis strictly on the provided metadata and transcript context.
+"""
 
     final_messages = [SystemMessage(content=system_prompt)] + state["messages"]
     SESSION_STORAGE[req.session_id].append({"role": "user", "content": req.message})
@@ -385,14 +456,26 @@ async def chat_interaction(req: ChatRequest):
     
     async def generate():
         full_response = ""
-        async for chunk in llm.astream(final_messages):
-            if chunk.content:
-                full_response += chunk.content
-                yield f"data: {chunk.content}\n\n"
-        
-        SESSION_STORAGE[req.session_id].append({"role": "assistant", "content": full_response})
-        yield "data: [DONE]\n\n"
-        
+        try:
+            # Safely stream the response
+            async for chunk in llm.astream(final_messages):
+                if chunk.content:
+                    full_response += chunk.content
+                    yield f"data: {chunk.content}\n\n"
+            
+            # Only save to history if the generation successfully finishes
+            SESSION_STORAGE[req.session_id].append({"role": "assistant", "content": full_response})
+            
+        except Exception as e:
+            # If Groq crashes (e.g., context window exceeded), print the error to the terminal
+            print(f"🚨 LLM Generation Error: {str(e)}")
+            # And send a graceful error message to the UI!
+            yield f"data: \n\n[Error generating response: {str(e)}]\n\n"
+            
+        finally:
+            # The 'finally' block GUARANTEES the stream closes properly so the frontend doesn't hang
+            yield "data: [DONE]\n\n"
+            
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.post("/api/clear")

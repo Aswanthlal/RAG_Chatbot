@@ -2,6 +2,14 @@
 "use client";
 import React, { useState, useRef } from 'react';
 
+const formatDuration = (seconds: number) => {
+  if (!seconds) return "Unknown";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+
 export default function Dashboard() {
   const [urls, setUrls] = useState({ youtube: '', instagram: '' });
   const [metadata, setMetadata] = useState<any>({ a: null, b: null });
@@ -9,6 +17,7 @@ export default function Dashboard() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   
+
   // Fix: Persist session ID across re-renders
   const [sessionId, setSessionId] = useState("session_" + crypto.randomUUID());
 
@@ -110,31 +119,37 @@ export default function Dashboard() {
       <div className="flex flex-1 gap-4 overflow-hidden">
         {/* Videos & Metadata Panel */}
         <div className="flex flex-col gap-4 w-1/2 overflow-y-auto pr-2">
-          {/* Video A */}
-          {metadata.a && (
-            <div className="bg-zinc-900 rounded border border-zinc-800 p-3 flex flex-col gap-2">
-              <div className="text-xs flex justify-between text-zinc-400">
-                <span className="font-bold text-emerald-400">YOUTUBE: {metadata.a.creator}</span>
-                <span>ER: {metadata.a.engagement_rate}% | Views: {metadata.a.views.toLocaleString()} | Likes: {metadata.a.likes.toLocaleString()}</span>
-              </div>
-              <iframe src={`https://www.youtube.com/embed/${metadata.a.video_id}`} className="w-full h-64 rounded border border-zinc-800" allowFullScreen />
-            </div>
-          )}
-          {/* Video B */}
-          {metadata.b && (
-            <div className="bg-zinc-900 rounded border border-zinc-800 p-3 flex flex-col gap-2">
-              <div className="text-xs flex justify-between text-zinc-400">
-                <span className="font-bold text-emerald-400">INSTAGRAM: {metadata.b.creator}</span>
-                {metadata.b.metadata_unavailable ? (
-                  <span className="text-yellow-500">API Telemetry Unavailable</span>
-                ) : (
-                  <span>ER: {metadata.b.engagement_rate}% | Views: {metadata.b.views.toLocaleString()} | Likes: {metadata.b.likes.toLocaleString()}</span>
-                )}
-              </div>
-              <iframe src={`https://www.instagram.com/p/${metadata.b.video_id}/embed`} className="w-full h-64 rounded border border-zinc-800" />
-            </div>
-          )}
-        </div>
+          {/* --- VIDEO A (YOUTUBE) CARD --- */}
+{metadata.a && (
+  <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
+    <h2 className="font-bold text-red-500 mb-2">YOUTUBE: {metadata.a.creator}</h2>
+    <div className="text-xs text-zinc-400 space-y-1">
+      <p><span className="text-zinc-50">ER:</span> {metadata.a.engagement_rate}%</p>
+      <p><span className="text-zinc-50">Views:</span> {metadata.a.views.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Likes:</span> {metadata.a.likes.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Comments:</span> {metadata.a.comments.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Subscribers:</span> {metadata.a.follower_count.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Duration:</span> {formatDuration(metadata.a.duration)}</p>
+    </div>
+  </div>
+)}
+
+{/* --- VIDEO B (INSTAGRAM) CARD --- */}
+{metadata.b && (
+  <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
+    <h2 className="font-bold text-pink-500 mb-2">INSTAGRAM: {metadata.b.creator}</h2>
+    <div className="text-xs text-zinc-400 space-y-1">
+      <p><span className="text-zinc-50">ER:</span> {metadata.b.engagement_rate}%</p>
+      <p><span className="text-zinc-50">Views:</span> {metadata.b.views.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Likes:</span> {metadata.b.likes.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Comments:</span> {metadata.b.comments.toLocaleString()}</p>
+      <p><span className="text-zinc-50">Followers:</span>{' '}{metadata.b.follower_count > 0 ? metadata.b.follower_count.toLocaleString() 
+       : <span className="text-yellow-500 font-bold">Hidden by IG API</span>}</p>
+      <p><span className="text-zinc-50">Duration:</span> {formatDuration(metadata.b.duration)}</p>
+    </div>
+  </div>
+)}
+</div>
 
         {/* Chat Interface */}
         <div className="w-1/2 bg-zinc-900 rounded border border-zinc-800 p-4 flex flex-col justify-between">
