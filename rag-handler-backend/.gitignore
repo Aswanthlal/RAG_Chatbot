@@ -1,4 +1,12 @@
+# Python virtual environments
 venv/
-pycache/
-*.pyc
+venv311/
+env/
+__pycache__/
+
+# Node/Next.js
+node_modules/
+.next/
+
+# Secrets (CRITICAL)
 .env
