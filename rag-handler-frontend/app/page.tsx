@@ -18,7 +18,6 @@ export default function Dashboard() {
   const [isLoading, setIsLoading] = useState(false);
   
 
-  // Fix: Persist session ID across re-renders
   const [sessionId, setSessionId] = useState("session_" + crypto.randomUUID());
 
   const handleIngest = async () => {
@@ -31,7 +30,6 @@ export default function Dashboard() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          // 🚨 Matches Python perfectly AND scrubs tracking tags!
           youtube_url: urls.youtube.split('?')[0], 
           instagram_url: urls.instagram.split('?')[0]
         }),
@@ -39,9 +37,6 @@ export default function Dashboard() {
       
       const data = await res.json();
       console.log("BACKEND RESPONSE:", data);
-      
-      // Update state with the returned data
-      // (Adjust 'data.a' and 'data.b' if your backend uses different keys like data.metadata_a)
       setMetadata({ 
         a: data.video_a || data.metadata_a || data.a || null, 
         b: data.video_b || data.metadata_b || data.b || null 
@@ -58,14 +53,13 @@ export default function Dashboard() {
     await fetch('http://127.0.0.1:9000/api/clear', { method: 'POST' });
     setMetadata({ a: null, b: null });
     setChat([]);
-    
-    // Force LangGraph to start a brand new memory thread!
     setSessionId("session_" + crypto.randomUUID()); 
   };
 
   const handleSend = async () => {
-    if (!input.trim() || !metadata.a?.video_id) return;
+    if (!input.trim() || !metadata.a?.video_id || isLoading) return;
     
+    setIsLoading(true);
     const userMsg = input;
     setInput('');
     setChat(prev => [...prev, { role: 'user', content: userMsg }, { role: 'assistant', content: '' }]);
@@ -108,6 +102,8 @@ export default function Dashboard() {
       }
     } catch (e) {
       console.error("Chat failed", e);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -136,37 +132,67 @@ export default function Dashboard() {
       <div className="flex flex-1 gap-4 overflow-hidden">
         {/* Videos & Metadata Panel */}
         <div className="flex flex-col gap-4 w-1/2 overflow-y-auto pr-2">
-          {/* --- VIDEO A (YOUTUBE) CARD --- */}
-{metadata.a && (
-  <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
-    <h2 className="font-bold text-red-500 mb-2">YOUTUBE: {metadata.a.creator}</h2>
-    <div className="text-xs text-zinc-400 space-y-1">
-      <p><span className="text-zinc-50">ER:</span> {metadata?.a?.engagement_rate ?? 0}%</p>
-      <p><span className="text-zinc-50">Views:</span> {metadata?.a?.views?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Likes:</span> {metadata?.a?.likes?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Comments:</span> {metadata?.a?.comments?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Subscribers:</span> {metadata?.a?.follower_count?.toLocaleString() ?? 'Hidden'}</p>
-    </div>
-  </div>
-)}
+          {/* VIDEO A (YOUTUBE) CARD */}
+        {metadata.a && (
+          <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
+            {/* NEW: YouTube Thumbnail */}
+            <div className="w-full h-48 mb-4 rounded overflow-hidden border border-zinc-700 relative group">
+              <img 
+                src={`https://img.youtube.com/vi/${metadata.a.video_id}/hqdefault.jpg`} 
+                alt="YouTube Thumbnail" 
+                className="w-full h-full object-cover"
+              />
+              <div className="absolute top-2 right-2 bg-black/70 px-2 py-1 rounded text-[10px] font-bold">
+                {formatDuration(metadata.a.duration)}
+              </div>
+            </div>
 
-{/* --- VIDEO B (INSTAGRAM) CARD --- */}
-{metadata.b && (
-  <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
-    <h2 className="font-bold text-pink-500 mb-2">INSTAGRAM: {metadata.b.creator}</h2>
-    <div className="text-xs text-zinc-400 space-y-1">
-      <p><span className="text-zinc-50">ER:</span> {metadata?.b?.engagement_rate ?? 0}%</p>
-      <p><span className="text-zinc-50">Views:</span> {metadata?.b?.views?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Likes:</span> {metadata?.b?.likes?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Comments:</span> {metadata?.b?.comments?.toLocaleString() ?? 0}</p>
-      <p><span className="text-zinc-50">Followers:</span> {
-        metadata?.b?.follower_count === null 
-          ? <span className="text-yellow-500 font-bold">Hidden by IG API</span>
-          : metadata?.b?.follower_count?.toLocaleString() ?? 0
-      }</p>
-    </div>
-  </div>
-)}
+            <h2 className="font-bold text-red-500 mb-2 truncate">YOUTUBE: {metadata.a.creator}</h2>
+            <div className="text-xs text-zinc-400 space-y-1">
+              <p><span className="text-zinc-50">ER:</span> {metadata?.a?.engagement_rate ?? 0}%</p>
+              <p><span className="text-zinc-50">Views:</span> {metadata?.a?.views?.toLocaleString() ?? 0}</p>
+              <p><span className="text-zinc-50">Likes:</span> {metadata?.a?.likes?.toLocaleString() ?? 0}</p>
+              <p><span className="text-zinc-50">Comments:</span> {metadata?.a?.comments?.toLocaleString() ?? 0}</p>
+              <p><span className="text-zinc-50">Subscribers:</span> {metadata?.a?.follower_count?.toLocaleString() ?? 'Hidden'}</p>
+            </div>
+          </div>
+        )}
+
+        {/* VIDEO B (INSTAGRAM) CARD */}
+        {metadata.b && (
+          <div className="bg-zinc-900 p-4 rounded border border-zinc-800">
+            {/* NEW: Instagram Thumbnail */}
+            <div className="w-full h-48 mb-4 rounded overflow-hidden border border-zinc-700 bg-zinc-950 flex items-center justify-center">
+            {metadata.b.thumbnail_url ? (
+                <img 
+                  src={metadata.b.thumbnail_url} 
+                  alt="Instagram Thumbnail" 
+                  className="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                />
+              ) : (
+                <span className="text-zinc-600 text-[10px] uppercase font-bold tracking-widest">Reel Thumbnail</span>
+              )}
+            </div>
+
+            <h2 className="font-bold text-pink-500 mb-2 truncate">INSTAGRAM: {metadata.b.creator}</h2>
+            <div className="text-xs text-zinc-400 space-y-1">
+              <p><span className="text-zinc-50">ER:</span> {metadata?.b?.engagement_rate ?? 0}%</p>
+              <p><span className="text-zinc-50">Views:</span> {metadata?.b?.views?.toLocaleString() ?? 0}</p>
+              <p><span className="text-zinc-50">Likes:</span> {
+                metadata?.b?.likes === -1 
+                  ? <span className="text-yellow-500 font-bold">Hidden</span>
+                  : metadata?.b?.likes?.toLocaleString() ?? 0
+              }</p>
+              <p><span className="text-zinc-50">Comments:</span> {metadata?.b?.comments?.toLocaleString() ?? 0}</p>
+              <p><span className="text-zinc-50">Followers:</span> {
+                metadata?.b?.follower_count === null 
+                  ? <span className="text-yellow-500 font-bold">Hidden by IG API</span>
+                  : metadata?.b?.follower_count?.toLocaleString() ?? 0
+              }</p>
+            </div>
+          </div>
+        )}
 </div>
 
         {/* Chat Interface */}
@@ -185,11 +211,18 @@ export default function Dashboard() {
             <input 
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !isLoading) handleSend();
+              }}
               placeholder="e.g. Compare the hooks in the first 5 seconds..." 
-              className="bg-zinc-950 border border-zinc-700 p-3 rounded flex-1 text-xs focus:outline-none focus:border-emerald-500"
+              className="bg-zinc-950 border border-zinc-700 p-3 rounded flex-1 text-xs focus:outline-none focus:border-emerald-500 disabled:opacity-50"
+              disabled={isLoading} 
             />
-            <button onClick={handleSend} className="bg-zinc-800 border border-zinc-700 px-4 py-2 rounded text-xs hover:bg-zinc-700 font-bold">
+            <button 
+              onClick={handleSend} 
+              disabled={isLoading} 
+              className="bg-zinc-800 border border-zinc-700 px-4 py-2 rounded text-xs hover:bg-zinc-700 font-bold disabled:opacity-50"
+            >
               SEND
             </button>
           </div>
