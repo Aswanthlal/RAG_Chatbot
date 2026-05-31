@@ -109,6 +109,23 @@ export default function Dashboard() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-zinc-50 p-4 font-mono">
+      
+      {/* --- NEW HEADER SECTION --- */}
+      <div className="flex justify-between items-center mb-4 px-1">
+        <h1 className="text-xl font-bold tracking-widest text-zinc-300 uppercase">
+          Creator Analytics Engine
+        </h1>
+        <div className="flex items-center gap-2 text-[10px] text-zinc-400 uppercase tracking-widest font-bold">
+          {/* Pulsing Status Dot */}
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+          </span>
+          Qdrant Online
+        </div>
+      </div>
+      {/* --------------------------- */}
+
       {/* Control Bar */}
       <div className="flex gap-4 mb-4 bg-zinc-900 p-3 rounded border border-zinc-800">
         <input 
@@ -121,10 +138,10 @@ export default function Dashboard() {
           className="bg-zinc-950 border border-zinc-700 p-2 rounded flex-1 text-xs"
           onChange={(e) => setUrls({ ...urls, instagram: e.target.value })}
         />
-        <button onClick={handleIngest} disabled={isLoading} className="bg-emerald-600 px-4 py-2 rounded text-xs hover:bg-emerald-500 font-bold disabled:opacity-50">
+        <button onClick={handleIngest} disabled={isLoading} className="bg-emerald-600 px-4 py-2 rounded text-xs hover:bg-emerald-500 font-bold disabled:opacity-50 tracking-wider">
           {isLoading ? 'INGESTING...' : 'INGEST & EMBED'}
         </button>
-        <button onClick={handleClear} className="bg-red-900/50 text-red-400 border border-red-900 px-4 py-2 rounded text-xs hover:bg-red-900/80 font-bold">
+        <button onClick={handleClear} className="bg-red-900/50 text-red-400 border border-red-900 px-4 py-2 rounded text-xs hover:bg-red-900/80 font-bold tracking-wider">
           RESET DB
         </button>
       </div>

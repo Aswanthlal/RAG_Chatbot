@@ -24,24 +24,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from deepgram import AsyncDeepgramClient
 
-# 1. Dynamically resolve the absolute path to the .env file
-env_path = Path(__file__).parent / ".env"
-
-# 2. Force load it and override any existing/cached system variables
-load_dotenv(dotenv_path=env_path, override=True)
-
-# 3. Safely fetch the key
-raw_key = os.getenv("DEEPGRAM_API_KEY")
-
-# 4. Fail loudly if it's truly missing
-if not raw_key:
-    raise ValueError(f"🚨 CRITICAL: Checked {env_path}, but DEEPGRAM_API_KEY is missing or empty!")
-
-# 5. Strip any accidental double-quotes or whitespace
-clean_key = raw_key.strip(' "\'')
-
-# 6. Initialize the client explicitly
-deepgram = AsyncDeepgramClient(api_key=clean_key)
 # ML Models
 from faster_whisper import WhisperModel
 from fastembed import TextEmbedding
@@ -55,6 +37,22 @@ from qdrant_client.http.models import Distance, VectorParams
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_groq import ChatGroq
+
+# resolve absolute path to the .env file
+env_path = Path(__file__).parent / ".env"
+
+# 2. Force load
+load_dotenv(dotenv_path=env_path, override=True)
+raw_key = os.getenv("DEEPGRAM_API_KEY")
+
+# 4. Fail loudly if missing
+if not raw_key:
+    raise ValueError(f"🚨 CRITICAL: Checked {env_path}, but DEEPGRAM_API_KEY is missing or empty!")
+
+clean_key = raw_key.strip(' "\'')
+
+# 6. Initialize client 
+deepgram = AsyncDeepgramClient(api_key=clean_key)
 
 load_dotenv()
 
@@ -149,7 +147,7 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
             }
 
         except Exception as e:
-            print(f"🚨 [IG] Error: {str(e)}")
+            print(f"[IG] Error: {str(e)}")
             # Safeguard cleanup on failure
             if audio_path and os.path.exists(audio_path):
                 try: os.remove(audio_path)
@@ -182,7 +180,7 @@ async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "ins
             return await build_youtube_metadata(video_id, transcript_data["text"], transcript_data["segments"])
 
         except Exception as e:
-            print(f"🚨 [YT] Error: {str(e)}")
+            print(f"[YT] Error: {str(e)}")
             # Safeguard cleanup on failure
             if audio_path and os.path.exists(audio_path):
                 try: os.remove(audio_path)
@@ -246,7 +244,7 @@ async def transcribe_with_deepgram(audio_path: str) -> Dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"🚨 Deepgram Runtime Error: {e}")
+        print(f"Deepgram Runtime Error: {e}")
         return {"text": "Transcription failed.", "segments": []}
     
     
@@ -272,7 +270,7 @@ async def build_youtube_metadata(video_id: str, transcript_text: str, segments: 
         # Offload network I/O out of the main async thread
         info = await asyncio.to_thread(fetch_info)
     except Exception as e:
-        print(f"🚨 [YT Metadata Extraction Error]: {e}")
+        print(f"[YT Metadata Extraction Error]: {e}")
         info = {}
 
     # Normalize the YYYYMMDD string format from yt-dlp to YYYY-MM-DD
