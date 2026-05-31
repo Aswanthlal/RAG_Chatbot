@@ -267,6 +267,8 @@ APIFY_API_TOKEN=your_apify_api_token
 
 ## 3. Start Infrastructure
 
+Docker to run Qdrant locally:
+
 ```bash
 docker compose up -d
 ```
@@ -285,11 +287,13 @@ cd rag-handler-backend
 
 python -m venv venv311
 
-# Windows
 venv311\Scripts\activate
 
 pip install -r requirements.txt
 
+celery -A tasks.celery_app worker --loglevel=info --pool=solo
+
+# In a separate terminal (with venv311 activated), launch the FastAPI server:
 uvicorn main:app --reload --port 9000
 ```
 
