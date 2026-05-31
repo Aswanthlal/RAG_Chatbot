@@ -1,27 +1,29 @@
 # Creator Analytics Engine: Omni-Channel RAG Pipeline
 
-A full-stack analytical engine designed to ingest, process, and compare social media performance metrics and transcripts across YouTube and Instagram.
+A full-stack Retrieval-Augmented Generation (RAG) system designed to ingest, process, and compare social media performance across YouTube and Instagram.
 
-The system implements a Retrieval-Augmented Generation (RAG) architecture that enables creators to ask contextual questions regarding engagement, hook effectiveness, creator performance, and content strategy using real video metadata and transcript data.
+The platform enables creators to analyze engagement metrics, compare content strategies, evaluate hook effectiveness, and generate evidence-based recommendations using transcript retrieval, vector search, and LLM reasoning.
 
 ---
 
-## Features
+# Features
 
 * Ingest YouTube and Instagram video URLs
-* Extract metadata and transcripts dynamically
-* Compute engagement metrics automatically
+* Extract video metadata dynamically
+* Generate transcripts using Deepgram
+* Compute engagement rates automatically
 * Chunk and embed transcript content
 * Store vectors in Qdrant
-* Perform retrieval-augmented analysis using LangGraph
-* Stream responses in real time
-* Maintain conversational memory across turns
-* Compare content across platforms
-* Provide source-aware answers with timestamp references
+* Retrieval-Augmented Generation (RAG)
+* LangGraph-powered query routing
+* Real-time streaming responses
+* Session-based conversational memory
+* Source-aware answers with timestamps
+* Side-by-side creator comparison interface
 
 ---
 
-## Architecture Overview
+# Architecture Overview
 
 ```text
 YouTube URL          Instagram URL
@@ -29,40 +31,41 @@ YouTube URL          Instagram URL
       └──────────┬──────────┘
                  ▼
       Metadata + Transcript Layer
+      (YT API / Apify / Deepgram)
                  │
                  ▼
-        Chunking + Embedding
+        Chunking + FastEmbed
                  │
                  ▼
-              Qdrant
+          Qdrant Vector DB
                  │
                  ▼
-            LangGraph
+         LangGraph Router
                  │
                  ▼
-          Groq Llama 3.1
+        Groq Llama 3.1 8B
                  │
                  ▼
-         Next.js Frontend
+          Next.js Frontend
 ```
 
 ---
 
-## Tech Stack
+# Tech Stack
 
-### Frontend
+## Frontend
 
 * Next.js
 * React
 * Tailwind CSS
 * Server-Sent Events (SSE)
 
-### Backend
+## Backend
 
 * FastAPI
 * AsyncIO
 
-### Retrieval & AI
+## AI & Retrieval
 
 * LangGraph
 * FastEmbed
@@ -70,42 +73,39 @@ YouTube URL          Instagram URL
 * Qdrant
 * Groq (Llama 3.1 8B Instant)
 
-### Transcript Processing
+## Data Extraction
 
 * yt-dlp
 * Deepgram Nova-2
-* Apify Instagram Services
+* Apify
+
+## Infrastructure
+
+* Docker
+* Redis (optional)
+* Celery (background worker prototype)
 
 ---
 
-## Architectural Decisions & Scalability Analysis
+# Key Architectural Decisions
 
-The architecture was designed around a theoretical workload of approximately:
+## 1. Audio Ingestion Strategy
 
-```text
-1,000 creators/day
-2,000 videos/day
-```
-
-while maintaining low infrastructure costs.
-
-### 1. Audio Ingestion Strategy
-
-#### Problem
+### Problem
 
 Traditional yt-dlp pipelines often rely on FFmpeg transcoding before transcription.
 
 This introduces:
 
-* Additional CPU load
+* CPU overhead
 * Disk I/O overhead
-* Increased processing latency
+* Additional latency
 
-#### Solution
+### Solution
 
-The pipeline downloads native audio streams directly and forwards them to Deepgram without local transcoding.
+The system downloads native audio streams directly and forwards them to Deepgram without local transcoding.
 
-#### Result
+### Result
 
 * Reduced ingestion latency
 * No FFmpeg dependency
@@ -113,113 +113,115 @@ The pipeline downloads native audio streams directly and forwards them to Deepgr
 
 ---
 
-### 2. Why BGE-Small?
+## 2. Why BGE-Small?
 
-#### Local Execution
+### Local Execution
 
 Embeddings are generated locally using FastEmbed.
 
-#### Cost Efficiency
+### Cost Efficiency
 
-No per-request embedding API costs.
+No recurring embedding API costs.
 
-#### Resource Efficiency
+### Resource Efficiency
 
-The model offers strong semantic retrieval quality while maintaining a small memory footprint suitable for standard server deployments.
+Low memory footprint while maintaining strong retrieval quality for social-media transcripts.
 
 ---
 
-### 3. Why Qdrant?
+## 3. Why Qdrant?
 
-#### Payload Filtering
+### Payload Filtering
 
-Every transcript chunk stores:
+Every chunk stores:
 
 * video_id
 * platform
 * start_time
 * end_time
 
-This enables filtered retrieval before vector search.
+allowing filtered retrieval before similarity search.
 
-#### Reduced Search Space
+### Predictable Retrieval
 
-Filtering limits retrieval to relevant video chunks before similarity search.
+Pre-filtering reduces search scope and improves retrieval efficiency as data volume grows.
 
-#### Persistence
+### Deployment 
 
-The implementation uses:
+Qdrant is deployed locally through Docker and accessed via:
 
 ```python
-QdrantClient(path="./qdrant_storage")
+QdrantClient(url="http://localhost:6333")
 ```
 
-allowing local persistence across server restarts.
+### Migration Path
 
-#### Migration Path
-
-The same architecture can be migrated to Qdrant Cloud with minimal configuration changes.
+The same architecture can migrate directly to Qdrant Cloud with minimal code changes.
 
 ---
 
-### 4. Why LangGraph?
+## 4. Why LangGraph?
 
-LangGraph was selected instead of a simple linear chain because the system contains multiple execution paths.
+LangGraph enables conditional execution paths rather than a single linear chain.
 
-#### Conditional Routing
+### Conversational Requests
 
-Conversational requests:
+Examples:
 
 ```text
+Hi
 Hello
 Thanks
-Good job
 ```
 
-bypass retrieval entirely.
+These bypass retrieval entirely.
 
-Analytical requests:
+### Analytical Requests
+
+Examples:
 
 ```text
 Compare hooks
 Why did Video B perform better?
 ```
 
-trigger vector retrieval.
+These trigger vector retrieval and analysis.
 
-This reduces unnecessary database lookups and token consumption.
+This reduces unnecessary vector searches and token consumption.
 
 ---
 
-## Graceful Degradation Strategy
+# Graceful Degradation Strategy
 
-Social platforms frequently impose restrictions on metadata access.
+Social media platforms frequently restrict metadata visibility and transcript availability.
 
-The pipeline is designed to continue operating even when partial data becomes unavailable.
+The system is designed to continue functioning when partial data becomes unavailable.
 
-### YouTube
+## YouTube
 
-1. Transcript API (when available)
-2. yt-dlp + Deepgram fallback
+1. Native transcript extraction
+2. Deepgram fallback
 
-### Instagram
+## Instagram
 
-1. Apify transcript extraction
+1. Apify extraction
 2. Caption fallback
 
-### Final Fallback
+## Final Fallback
 
-If transcript extraction fails entirely, the system converts available metadata and descriptions into a structured text block so that:
+If transcript extraction fails entirely, available metadata and descriptions are converted into structured text blocks so the RAG pipeline remains operational.
 
-* Engagement calculations remain available
-* Metadata questions still function
-* The vector pipeline remains operational
+This ensures:
+
+* Engagement calculations still work
+* Metadata questions remain answerable
+* Vector retrieval remains functional
 
 ---
 
-## Known Limitations
+# Known Limitations
 
-### Instagram Restrictions
+## Instagram Restrictions
 
 Instagram may hide:
 
@@ -229,10 +231,31 @@ Instagram may hide:
 
 depending on platform restrictions and scraper availability.
 
+## Transcript Dependency
 
-## Environment Variables
+Retrieval quality depends on transcript quality.
 
-Create a `.env` file inside the backend directory.
+# Installation
+
+## 1. Clone Repository
+
+```bash
+git clone https://github.com/Aswanthlal/rag-handler.git
+
+cd rag-handler
+```
+
+---
+
+## 2. Configure Environment Variables
+
+Create:
+
+```text
+rag-handler-backend/.env
+```
+
+Add:
 
 ```env
 DEEPGRAM_API_KEY=your_deepgram_api_key
@@ -242,15 +265,25 @@ APIFY_API_TOKEN=your_apify_api_token
 
 ---
 
-## Backend Setup
+## 3. Start Infrastructure
+
+```bash
+docker compose up -d
+```
+
+This starts:
+
+* Qdrant
+* Redis
+
+---
+
+## 4. Start Backend
 
 ```bash
 cd rag-handler-backend
 
 python -m venv venv311
-
-# Linux / Mac
-source venv311/bin/activate
 
 # Windows
 venv311\Scripts\activate
@@ -260,17 +293,9 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 9000
 ```
 
-The application automatically initializes:
-
-```text
-./qdrant_storage
-```
-
-for persistent local vector storage.
-
 ---
 
-## Frontend Setup
+## 5. Start Frontend
 
 ```bash
 cd rag-handler-frontend
@@ -280,10 +305,10 @@ npm install
 npm run dev
 ```
 
-Open:
+---
+
+## 6. Open Application
 
 ```text
 http://localhost:3000
 ```
-
----
