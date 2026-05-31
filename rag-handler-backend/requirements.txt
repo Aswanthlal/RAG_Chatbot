@@ -21,3 +21,4 @@ pinecone
 google-generativeai
 celery 
 redis
+deepgram-sdk

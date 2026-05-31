@@ -12,7 +12,36 @@ from dotenv import load_dotenv
 from apify_client import ApifyClient
 from fastapi import FastAPI, BackgroundTasks
 from tasks import ingest_and_embed_video_task
+from deepgram import AsyncDeepgramClient
+import tempfile
+from youtube_transcript_api import YouTubeTranscriptApi
+import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
 
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from deepgram import AsyncDeepgramClient
+
+# 1. Dynamically resolve the absolute path to the .env file
+env_path = Path(__file__).parent / ".env"
+
+# 2. Force load it and override any existing/cached system variables
+load_dotenv(dotenv_path=env_path, override=True)
+
+# 3. Safely fetch the key
+raw_key = os.getenv("DEEPGRAM_API_KEY")
+
+# 4. Fail loudly if it's truly missing
+if not raw_key:
+    raise ValueError(f"🚨 CRITICAL: Checked {env_path}, but DEEPGRAM_API_KEY is missing or empty!")
+
+# 5. Strip any accidental double-quotes or whitespace
+clean_key = raw_key.strip(' "\'')
+
+# 6. Initialize the client explicitly
+deepgram = AsyncDeepgramClient(api_key=clean_key)
 # ML Models
 from faster_whisper import WhisperModel
 from fastembed import TextEmbedding
@@ -66,154 +95,218 @@ groq_client = Groq()
 
 apify_client = ApifyClient(os.getenv("APIFY_API_TOKEN"))
 
+# Force load the .env file explicitly
+load_dotenv()
+
+# Grab the key and strip any hidden quotes/spaces
+api_key = os.getenv("DEEPGRAM_API_KEY").strip(' "\'')
+
+# Pass the key explicitly
+deepgram = AsyncDeepgramClient(api_key=api_key)
+
 async def extract_metadata_and_audio(url: str, platform: Literal["youtube", "instagram"]) -> Dict[str, Any]:
     video_id = clean_url_to_id(url, platform)
+    audio_path = None
     
-    # apify microservices
     if platform == "instagram":
-        print(f"[IG]: Fanning out to Apify Microservices (Metadata + Transcript)...")
+        print(f"[IG]: Using Apify for Metadata + Deepgram for Transcription...")
         try:
-            #Scraper
-            meta_task = asyncio.to_thread(
-                apify_client.actor("apify/instagram-scraper").call, 
+            # === Apify for Metadata ===
+            meta_run = await asyncio.to_thread(
+                apify_client.actor("apify/instagram-scraper").call,
                 run_input={"directUrls": [url]}
             )
-            
-            # Transcript Scraper
-            transcript_task = asyncio.to_thread(
-                apify_client.actor("apple_yang/instagram-transcripts-scraper").call, 
-                run_input={"videoUrl": url},
-                # timeout_secs=20
-            )
-            
-    
-            results = await asyncio.gather(meta_task, transcript_task, return_exceptions=True)
-            meta_run, transcript_run = results[0], results[1]
-            
-            # Parse Metadata
-            if isinstance(meta_run, Exception):
-                raise meta_run
-            
             meta_id = getattr(meta_run, "default_dataset_id", None)
             meta_items = apify_client.dataset(meta_id).list_items().items
-            if not meta_items: raise Exception("Apify Metadata Scraper returned empty.")
-            real_meta = meta_items[0]
-            
-            # Parse Transcript(Fallback)
-            trans_data = {}
-            if not isinstance(transcript_run, Exception):
-                trans_id = getattr(transcript_run, "default_dataset_id", None)
-                if trans_id:
-                    trans_items = apify_client.dataset(trans_id).list_items().items
-                    if trans_items:
-                        trans_data = trans_items[0]
-            else:
-                print(f" [IG]: Transcript scraper timed out/blocked. Falling back to caption.")
+            real_meta = meta_items[0] if meta_items else {}
 
+            # === Download Audio ===
+            audio_path = await download_audio(url, video_id, platform)
             
-            final_text = trans_data.get("text") or real_meta.get("caption", "No transcript available.")
-            real_views = real_meta.get("videoViewCount") or real_meta.get("playCount") or real_meta.get("viewCount") or 1
-            owner_node = real_meta.get("owner", {})
-            # follower_count extraction
-            raw_followers = (
-                real_meta.get("ownerFollowersCount") or 
-                real_meta.get("owner", {}).get("followersCount") or 
-                real_meta.get("user", {}).get("edge_followed_by", {}).get("count")
-            )
+            # === Deepgram Transcription ===
+            transcript_data = await transcribe_with_deepgram(audio_path)
             
-            follower_count = raw_followers if raw_followers else None
-            
+            # Clean up temp audio file after successful processing
+            if audio_path and os.path.exists(audio_path):
+                try: os.remove(audio_path)
+                except: pass
+
             return {
                 "video_id": video_id,
                 "platform": "Instagram",
-                "creator": real_meta.get("ownerUsername", trans_data.get("userName", "Unknown")),
-                "follower_count": follower_count,
+                "creator": real_meta.get("ownerUsername", "Unknown"),
+                "follower_count": real_meta.get("ownerFollowersCount") or real_meta.get("owner", {}).get("followersCount"),
                 "thumbnail_url": real_meta.get("displayUrl") or real_meta.get("thumbnailUrl"),
-                "views": real_views, 
-                "thumbnail_url": trans_data.get("img") or real_meta.get("displayUrl") or real_meta.get("thumbnailUrl") or real_meta.get("imageUrl"),
-                "likes": real_meta.get("likesCount", trans_data.get("likeCount", 0)),
-                "comments": real_meta.get("commentsCount", trans_data.get("commentCount", 0)),
-                "duration": real_meta.get("videoDuration", trans_data.get("duration", 0)),
-                "upload_date": real_meta.get("timestamp", "Unknown"), 
-                "hashtags": real_meta.get("hashtags", []), 
-                "audio_path": None, 
-                "apify_transcript_text": final_text, 
-                "apify_transcript_segments": trans_data.get("segments", []), 
+                "views": real_meta.get("videoViewCount") or real_meta.get("playCount") or 1,
+                "likes": real_meta.get("likesCount", 0),
+                "comments": real_meta.get("commentsCount", 0),
+                "duration": real_meta.get("videoDuration", 0),
+                "upload_date": real_meta.get("timestamp", "Unknown"),
+                "hashtags": real_meta.get("hashtags", []),
+                "apify_transcript_text": transcript_data["text"],
+                "apify_transcript_segments": transcript_data["segments"],
                 "metadata_unavailable": False
             }
-       
-        except Exception as e:
-            print(f" YOUTUBE FATAL ERROR: {str(e)}") 
-            return {"video_id": video_id, "platform": "YouTube", "metadata_unavailable": True, "error": str(e)}
 
-    # yt-dlp + YouTubeTranscriptApi
+        except Exception as e:
+            print(f"🚨 [IG] Error: {str(e)}")
+            # Safeguard cleanup on failure
+            if audio_path and os.path.exists(audio_path):
+                try: os.remove(audio_path)
+                except: pass
+            return {"video_id": video_id, "platform": "Instagram", "metadata_unavailable": True, "error": str(e)}
 
     elif platform == "youtube":
-        print(f"[YT]: Extracting YouTube metadata using native libraries...")
+        print(f"[YT]: Using yt-dlp + Deepgram...")
         try:
-            import yt_dlp
-            from youtube_transcript_api import YouTubeTranscriptApi
-            
-            ydl_opts = {
-                'skip_download': True, 
-                'quiet': True, 
-                'no_warnings': True,
-                'extract_flat': False
-            }
-            
-            # Metadata
-            def fetch_yt_meta():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    return ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-                    
-            info = await asyncio.to_thread(fetch_yt_meta)
-            
-            # Fetch Transcript
-            transcript_text = ""
+            # Try native captions first (fastest & free)
             try:
-                def fetch_transcript():
-                    from youtube_transcript_api import YouTubeTranscriptApi
-                    try:
-                    
-                        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                        for transcript in transcript_list:
-                            return " ".join([t['text'] for t in transcript.fetch()])
-                    except AttributeError:
-                        # Graceful fallback
-                        t_list = YouTubeTranscriptApi.get_transcript(video_id)
-                        return " ".join([t['text'] for t in t_list])
-                        
-                transcript_text = await asyncio.to_thread(fetch_transcript)
-                
-                # Force fallback if library returns empty text
-                if not transcript_text.strip():
-                    raise Exception("Empty transcript returned.")
-                    
-            except Exception as e:
-                
-                print(f"[YT]: No captions available. Falling back to title/description.")
-                transcript_text = f"Title: {info.get('title', '')}. Description: {info.get('description', '')}"
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                for t in transcript_list:
+                    caption_text = " ".join([item['text'] for item in t.fetch()])
+                    if caption_text.strip():
+                        # CHANGE HERE: Add await
+                        return await build_youtube_metadata(video_id, caption_text, None)
+            except Exception:
+                print(f"[YT]: Native captions unavailable for {video_id}. Falling back to Deepgram...")
 
-            return {
-                "video_id": video_id,
-                "platform": "YouTube",
-                "creator": info.get("uploader", "Unknown"),
-                "follower_count": info.get("channel_follower_count", 0), 
-                "views": info.get("view_count", 0) or 1,
-                "likes": info.get("like_count", 0) or 0,
-                "comments": info.get("comment_count", 0) or 0,
-                "duration": info.get("duration", 0), 
-                "upload_date": info.get("upload_date", "Unknown"), 
-                "hashtags": info.get("tags", []), 
-                "audio_path": None,
-                "apify_transcript_text": transcript_text,
-                "apify_transcript_segments": [],
-                "metadata_unavailable": False
-            }
+            # Download audio + Deepgram
+            audio_path = await download_audio(url, video_id, platform)
+            transcript_data = await transcribe_with_deepgram(audio_path)
+            
+            # Clean up temp audio file after successful processing
+            if audio_path and os.path.exists(audio_path):
+                try: os.remove(audio_path)
+                except: pass
+
+            return await build_youtube_metadata(video_id, transcript_data["text"], transcript_data["segments"])
+
         except Exception as e:
-            print(f"🚨 YOUTUBE FATAL ERROR: {str(e)}")
+            print(f"🚨 [YT] Error: {str(e)}")
+            # Safeguard cleanup on failure
+            if audio_path and os.path.exists(audio_path):
+                try: os.remove(audio_path)
+                except: pass
             return {"video_id": video_id, "platform": "YouTube", "metadata_unavailable": True, "error": str(e)}
+        
+async def download_audio(url: str, video_id: str, platform: str) -> str:
+    """Download audio using yt-dlp. Bypasses FFmpeg requirement by using native formats."""
+    temp_dir = tempfile.gettempdir()
     
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        # Let yt-dlp determine the correct native file extension (e.g., .webm or .m4a)
+        'outtmpl': f"{temp_dir}/{video_id}_{platform}.%(ext)s",
+        'quiet': True,
+        'no_warnings': True,
+        # WE REMOVED THE FFMPEG POSTPROCESSOR!
+    }
+    
+    def download():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Download and extract the info dictionary simultaneously
+            info = ydl.extract_info(url, download=True)
+            # Ask yt-dlp exactly what it named the final saved file
+            return ydl.prepare_filename(info)
+    
+    # Run the download in a worker thread and capture the REAL path
+    actual_audio_path = await asyncio.to_thread(download)
+    return actual_audio_path
+
+async def transcribe_with_deepgram(audio_path: str) -> Dict[str, Any]:
+    """Transcribe using Deepgram Nova models with native v7 async support."""
+    try:
+        with open(audio_path, "rb") as audio_file:
+            payload = audio_file.read()
+
+        # Notice the 'await' keyword here. No thread pools needed anymore!
+        response = await deepgram.listen.v1.media.transcribe_file(
+            request=payload,
+            model="nova-2",      
+            smart_format=True,
+            utterances=True,     
+            punctuate=True,
+            language="en",
+        )
+
+        # The response parsing remains exactly the same
+        channel = response.results.channels[0].alternatives[0]
+        
+        segments = []
+        for utterance in getattr(channel, 'utterances', []):
+            segments.append({
+                "start": utterance.start,
+                "end": utterance.end,
+                "text": utterance.transcript
+            })
+
+        return {
+            "text": channel.transcript,
+            "segments": segments or [{"start": 0.0, "end": 60.0, "text": channel.transcript}]
+        }
+
+    except Exception as e:
+        print(f"🚨 Deepgram Runtime Error: {e}")
+        return {"text": "Transcription failed.", "segments": []}
+    
+    
+
+async def build_youtube_metadata(video_id: str, transcript_text: str, segments: List[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Extracts rich YouTube metadata using yt-dlp safely via a separate thread
+    and formats it to match the unified schema used by the downstream pipeline.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': False,  # Required to parse detailed metrics like subscriber/like counts
+    }
+    
+    def fetch_info():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+            
+    try:
+        # Offload network I/O out of the main async thread
+        info = await asyncio.to_thread(fetch_info)
+    except Exception as e:
+        print(f"🚨 [YT Metadata Extraction Error]: {e}")
+        info = {}
+
+    # Normalize the YYYYMMDD string format from yt-dlp to YYYY-MM-DD
+    raw_date = info.get("upload_date", "")
+    upload_date = (
+        f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}" 
+        if isinstance(raw_date, str) and len(raw_date) == 8 
+        else "Unknown"
+    )
+
+    # Calculate defensive duration fallback
+    duration = float(info.get("duration", 0))
+
+    # Match the unified payload schema precisely
+    return {
+        "video_id": video_id,
+        "platform": "YouTube",
+        "title": info.get("title", "Unknown"),
+        "creator": info.get("uploader", "Unknown"),
+        "follower_count": info.get("channel_follower_count") or info.get("subscriber_count") or 0,
+        "thumbnail_url": info.get("thumbnail"),
+        "views": info.get("view_count", 0),
+        "likes": info.get("like_count", 0),
+        "comments": info.get("comment_count", 0),
+        "duration": duration,
+        "upload_date": upload_date,
+        "hashtags": info.get("tags", []),
+        "apify_transcript_text": transcript_text,
+        # Ensure segments never fallback to None; provide a bounded window if empty
+        "apify_transcript_segments": segments or [{"start": 0.0, "end": duration or 60.0, "text": transcript_text}],
+        "metadata_unavailable": False if info else True
+    }
+
+
 
 def transcribe_and_embed(item: dict, label: str):
     if item.get("metadata_unavailable"): 
