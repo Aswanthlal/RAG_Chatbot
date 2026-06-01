@@ -38,6 +38,19 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_groq import ChatGroq
 
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # resolve absolute path to the .env file
 env_path = Path(__file__).parent / ".env"
 
@@ -47,7 +60,7 @@ raw_key = os.getenv("DEEPGRAM_API_KEY")
 
 # 4. Fail loudly if missing
 if not raw_key:
-    raise ValueError(f"🚨 CRITICAL: Checked {env_path}, but DEEPGRAM_API_KEY is missing or empty!")
+    raise ValueError(f"CRITICAL: Checked {env_path}, but DEEPGRAM_API_KEY is missing or empty!")
 
 clean_key = raw_key.strip(' "\'')
 
@@ -316,18 +329,18 @@ def transcribe_and_embed(item: dict, label: str):
     
     #INSTAGRAM
     if item["platform"] == "Instagram" and item.get("apify_transcript_segments"):
-        print(f"🧬 [{label}]: Using Apify Pre-Transcribed Segments...")
+        print(f"[{label}]: Using Apify Pre-Transcribed Segments...")
         segments = [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in item["apify_transcript_segments"]]
         aggregated_chunks = aggregate_segments(segments, max_duration=15.0)
         
     elif item["platform"] == "Instagram" and item.get("apify_transcript_text"):
-        print(f"🧬 [{label}]: Using Apify Pre-Transcribed Text/Caption...")
+        print(f"[{label}]: Using Apify Pre-Transcribed Text/Caption...")
         text_payload = item["apify_transcript_text"]
         aggregated_chunks = [{"start": 0.0, "end": 60.0, "text": text_payload}]
         
     #YOUTUBE
     elif item["platform"] == "YouTube" and item.get("apify_transcript_text"):
-        print(f"🧬 [{label}]: Using YouTube Native Transcript / Text Fallback...")
+        print(f"[{label}]: Using YouTube Native Transcript / Text Fallback...")
         text_payload = item["apify_transcript_text"]
         
         if text_payload.startswith("Title:"):
@@ -462,10 +475,10 @@ def route_query(state: dict) -> str:
     conversational_triggers = ["hi", "hello", "hey", "thanks", "thank you", "summarize", "who are you", "ok", "got it", "awesome"]
     
     if any(query.startswith(trigger) or query == trigger for trigger in conversational_triggers):
-        print("🚦 [Router]: Conversational intent detected. Bypassing Vector DB...")
+        print(" [Router]: Conversational intent detected. Bypassing Vector DB...")
         return "bypass"
         
-    print("🚦 [Router]: Analytical intent detected. Routing to Qdrant...")
+    print(" [Router]: Analytical intent detected. Routing to Qdrant...")
     return "retrieve"
 
 # GRAPH COMPILATION
@@ -536,8 +549,15 @@ async def ingest_pipeline(payload: IngestRequest):
         if not item.get("metadata_unavailable"):
             v = item.get("views", 1)
             
-            real_likes = 0 if item.get("likes") == -1 else item.get("likes", 0)
-            item["engagement_rate"] = round(((real_likes + item.get("comments", 0)) / v) * 100, 2)
+            real_likes = int(item.get("likes") or 0)
+            real_comments = int(item.get("comments") or 0)
+            v = int(item.get("views") or 0)
+
+            # Calculate ER, protecting against division by zero
+            if v > 0:
+                item["engagement_rate"] = round(((real_likes + real_comments) / v) * 100, 2)
+            else:
+                item["engagement_rate"] = 0.0
             
         METADATA_DATABASE[item["video_id"]] = item
         
@@ -608,12 +628,14 @@ TRANSCRIPT CONTEXT:
 {context}
 
 CRITICAL RULES - VIOLATION NOT ALLOWED:
-1. Calculate engagement rate EXACTLY as: ((likes + comments) / views) * 100. Round to 2 decimal places. Never invent different formulas.
-2. NEVER repeat paragraphs. Be concise. Use bullet points.
-3. If follower count is unavailable or null, say exactly: "Follower count unavailable".
-4. For hooks: Clearly distinguish between spoken audio, captions, and textual metadata. Do not claim visual elements unless in transcript.
-5. If the premise is wrong (e.g. "why A got more engagement" when B has higher ER), correct it immediately in the first sentence.
-6. Do not invent CTAs, logos, or branding that are not explicitly in the transcript context.
+1. CITATIONS ARE MANDATORY: Every time you reference or quote the transcript, you MUST append a source citation at the end of the sentence or bullet point. Format exactly like this: [Source: Video A, 0.0s-15.0s] or [Source: Video B, Chunk 1].
+2. STRICT TIME WINDOWS & EXTRACTION: You are STRICTLY FORBIDDEN from outputting the entire retrieved transcript chunk. If a user asks for "the first 5 seconds", you must extract and quote ONLY the specific sentences spoken between 0.0s and 5.0s. Stop quoting immediately after the requested timestamp. Do not write a single word of transcript that falls outside the user's requested window.
+3. Calculate engagement rate EXACTLY as: ((likes + comments) / views) * 100. Round to 2 decimal places. Never invent different formulas.
+4. NEVER repeat paragraphs. Be concise. Use bullet points.
+5. If follower count is unavailable or null, say exactly: "Follower count unavailable".
+6. For hooks: Clearly distinguish between spoken audio, captions, and textual metadata. Do not claim visual elements unless in transcript.
+7. If the premise is wrong (e.g. "why A got more engagement" when B has higher ER), correct it immediately in the first sentence.
+8. Do not invent CTAs, logos, or branding that are not explicitly in the transcript context.
 """
 
     final_messages = [SystemMessage(content=system_prompt)] + state["messages"]
