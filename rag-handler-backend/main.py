@@ -628,8 +628,8 @@ TRANSCRIPT CONTEXT:
 {context}
 
 CRITICAL RULES - VIOLATION NOT ALLOWED:
-1. CITATIONS ARE MANDATORY: Every time you reference or quote the transcript, you MUST append a source citation at the end of the sentence or bullet point. Format exactly like this: [Source: Video A, 0.0s-15.0s] or [Source: Video B, Chunk 1].
-2. STRICT TIME WINDOWS & EXTRACTION: You are STRICTLY FORBIDDEN from outputting the entire retrieved transcript chunk. If a user asks for "the first 5 seconds", you must extract and quote ONLY the specific sentences spoken between 0.0s and 5.0s. Stop quoting immediately after the requested timestamp. Do not write a single word of transcript that falls outside the user's requested window.
+11. CITATIONS ARE MANDATORY: You must append a source citation at the VERY END of every quote or data point. Format exactly like this: [Source: Video A, 0.0s-5.0s]. Do NOT put timestamps in headers or bold text. 
+2. STRICT TIME WINDOWS: If the user asks for a specific timeframe (e.g., "first 5 seconds"), you MUST ONLY extract the text within that window. Furthermore, your citation MUST reflect the user's requested window (e.g., 0.0s-5.0s), NOT the full duration of the retrieved database chunk.
 3. Calculate engagement rate EXACTLY as: ((likes + comments) / views) * 100. Round to 2 decimal places. Never invent different formulas.
 4. NEVER repeat paragraphs. Be concise. Use bullet points.
 5. If follower count is unavailable or null, say exactly: "Follower count unavailable".
